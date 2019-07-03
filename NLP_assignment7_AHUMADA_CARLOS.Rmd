@@ -1,0 +1,289 @@
+---
+title: "Naive Bayes for Classifying Bills on Immigration"
+author: "Carlos Ahumada"
+date: "March 28, 2019"
+output:
+  html_notebook:
+    toc: true 
+    toc_depth: 3  
+    theme: united  
+    highlight: tango  
+---
+
+
+For this task I am going to use dataset on immigration bills from 1947 to 2016 in the U.S. Congress obtained from the [Comparative Agendas Project](https://www.comparativeagendas.net/us). This dataset contains a brief description (usually one sentence) of the topic of the bill, along with other variables such as name of the Legislator who presented the bill, the date, the party, and others. Using a Naive Bayes model, I am going to predict whether a bill was presented by a Republican or a Democrat based on the description. 
+
+Since the descriptions contains the main topic of the bills, this algortihm should find enough differences between Democrats and Republicans to correctly classify them. 
+
+
+#Libraries 
+```{r include=FALSE}
+library(ggplot2)
+library (readtext)
+library(magrittr)
+library(tidytext)
+library(dplyr)
+library(e1071)
+library(dplyr)
+library(caret)
+library(tm)
+library(DMwR)
+```
+
+
+#Data Preparation
+```{r include=FALSE}
+#Loading Dateset
+bills <- read.csv("C:/Users/carlo/Desktop/Bills-1947-2016-9.csv")
+
+#Getting rid of observations without party classification 
+bills <- bills [!is.na(bills$party), ]
+
+#Renaming Party classification and keeping only Republicans and Demcrats (7 bills in total were not presented by any of these two parties)
+bills$party <- as.character (bills$party)
+bills$party <- ifelse (bills$party=="100", "Democrat", 
+                       ifelse (bills$party=="200", "Republican", NA))
+bills <- bills [!is.na(bills$party), ]
+
+#Setting description as characters
+bills$description <- as.character(bills$description)
+
+#Final Dataset keeping relevant columns 
+bills_class <- bills [ ,c("description", "party")]
+bills_class$party <- as.factor(bills_class$party)
+```
+
+
+```{r echo=TRUE}
+#Visualizing number of bills per party 
+partybills <- ggplot(data = bills_class) + 
+  geom_bar(mapping = aes(x = party, fill = party))
+partybills <- partybills+scale_fill_manual(values=c("blue", "red")) 
+partybills + ggtitle("Total Number of Bills on Immigration by party (1947-2016)")
+```
+
+As it can be seen in the graph above, there is a class imbalance. There are significantly more bills proposed by Democrat members than by Republicans in this period. For so, a class imbalance solution might be in place. However, this and other modification would be done in the tuning section. 
+
+#Naive Bayes model on imbalanced class
+
+First I need to randomize the documents, then prepare the corpus and finally create a document-term-matrix.
+```{r}
+#Randomizing rows
+set.seed(1628)
+bills_imbalanced <- bills_class[sample(row.names (bills_class)), ]
+
+#Creating corpus
+bills_corpus <- Corpus(VectorSource(bills_imbalanced$description))
+
+#Creating dtm
+bills_dtm <- DocumentTermMatrix(
+  bills_corpus,
+  control = list(
+    tolower = TRUE,
+    removeNumbers = FALSE,
+    stopwords = TRUE,
+    removePunctuation = TRUE
+  )
+)
+```
+
+
+Now, let's divide the dtm into train, dev, and test sets. 
+```{r}
+#Dividing dtm into train, dev and test set. Since a randomization occured before, we can divide directly by rows. 
+bills_dtm_train <- bills_dtm[1:3228, ] #60% of total observations
+bills_dtm_dev <- bills_dtm[3229:4304, ] #20% of total observations
+bills_dtm_test <- bills_dtm[4305:5831, ] #20% of total observations
+
+
+bills_train_labels <- bills_imbalanced[1:3228, ]$party
+bills_dev_labels <- bills_imbalanced[3229:4304, ]$party
+bills_test_labels <- bills_imbalanced[4305:5831, ]$party
+
+#class balance in training set
+bills_train_labels %>%
+  table %>%
+  prop.table
+
+```
+In the training set, 60.59% of the bills come from Democrats and 39.41% from Republicans. 
+
+```{r}
+#class balance in training set
+bills_dev_labels %>%
+  table %>%
+  prop.table
+
+```
+In the training set, 60.50% of the bills come from Democrats and 39.49% from Republicans. 
+
+```{r}
+#class balance in training set
+bills_test_labels %>%
+  table %>%
+  prop.table
+```
+In the training set, 62.27% of the bills come from Democrats and 37.26% from Republicans.
+
+Now, it is important to change the count of words for the presence or abscence of words. The Naive Bayes uses this metric to calculate probabilities.
+```{r}
+#Converting from numeric (frequencies) to appearing words or not
+convert_counts <- function(x) {
+  x <- ifelse(x > 0, "Yes", "No")
+}
+
+train <- bills_dtm_train %>%
+  apply(MARGIN = 2, convert_counts)
+
+dev <- bills_dtm_dev %>%
+  apply(MARGIN = 2, convert_counts)
+
+test <- bills_dtm_test %>%
+  apply(MARGIN = 2, convert_counts)
+
+```
+
+##Training the classifier
+```{r}
+#Training classifier in the test set
+bills_classifier <- naiveBayes(train, bills_train_labels)
+
+#Testing the model in the dev set
+bills_pred <- predict(bills_classifier, dev)
+
+#Visualizing results in dev set
+confusionMatrix(bills_pred, bills_dev_labels, mode = "prec_recall")
+                
+```
+
+The acurracy of the model in the dev set is only 65.52%, and reports a F1 score of .7217. It is important to remember that this relatively "good" F1 score might be due to the class imbalance. Now let's modify the algorithm to see if we can improve the model before running it on the test set. To do so, I am going to apply Laplace smoothing. Laplace smoothing works to get rid of zero probabilities of words in a class that could affect the model. 
+
+##Tuning: Naive Bayes with Laplace smoothing on dev set
+```{r}
+#Training classifier in the test set with Laplace smoothing
+bills_classifier2 <- naiveBayes(train, bills_train_labels, laplace=1)
+
+#Testing the model in the dev set
+bills_pred2 <- predict(bills_classifier2, dev)
+
+#Visualizing results in dev set
+confusionMatrix(bills_pred2, bills_dev_labels, mode = "prec_recall")
+```
+
+By applying the Laplace smoothing, the accurcy increases to 70.54%, and the F1 Score to .7800. So the final model to be used for the test set will be the Naive Bayes with Laplace smoothing. Now, let's appy a class imbalance solution and test again the model. 
+
+#Balancing Dataset
+
+##Tuning: Naive Bayes with Laplace smoothing on dev set with balanced class 
+```{r include=FALSE}
+#Applying imbalance solution: SMOTE
+bills_imbalanced$description <- as.factor(bills_imbalanced$description)
+bills_balanced <- SMOTE(party ~., bills_imbalanced, perc.over = 100)
+
+#Randomizing rows
+set.seed(1628)
+bills_balanced <- bills_balanced[sample(row.names (bills_balanced)), ]
+
+#Creating corpus
+bills_corpus2 <- Corpus(VectorSource(bills_balanced$description))
+```
+
+```{r include=FALSE}
+#Creating dtm
+bills_dtm2 <- DocumentTermMatrix(
+  bills_corpus2,
+  control = list(
+    tolower = TRUE,
+    removeNumbers = FALSE,
+    stopwords = TRUE,
+    removePunctuation = TRUE
+  )
+)
+
+#Dividing dtm into train, dev and test set. Since a randomization occured before, we can divide directly by rows. 
+bills_dtm_train2 <- bills_dtm2[1:5438, ] #60% of total observations
+bills_dtm_dev2 <- bills_dtm2[5439:7251, ] #20% of total observations
+bills_dtm_test2 <- bills_dtm2[7252:9064, ] #20% of total observations
+
+
+bills_train_labels2 <- bills_balanced[1:5438, ]$party
+bills_dev_labels2 <- bills_balanced[5439:7251, ]$party
+bills_test_labels2 <- bills_balanced[7252:9064, ]$party
+```
+
+```{r echo=TRUE}
+#class balance in training set
+bills_train_labels2 %>%
+  table %>%
+  prop.table
+```
+In the training set, 49.89% of the bills come from Democrats and 50.11% from Republicans. 
+
+```{r echo=TRUE}
+#class balance in training set
+bills_dev_labels2 %>%
+  table %>%
+  prop.table
+
+```
+In the training set, 47.99% of the bills come from Democrats and 52.01% from Republicans. 
+
+```{r echo=TRUE}
+#class balance in training set
+bills_test_labels2 %>%
+  table %>%
+  prop.table
+```
+In the training set, 52.34% of the bills come from Democrats and 47.66% from Republicans.
+
+
+```{r include=FALSE}
+#Converting from numeric (frequencies) to appearing words or not
+train2 <- bills_dtm_train2 %>%
+  apply(MARGIN = 2, convert_counts)
+
+dev2 <- bills_dtm_dev2 %>%
+  apply(MARGIN = 2, convert_counts)
+
+test2 <- bills_dtm_test2 %>%
+  apply(MARGIN = 2, convert_counts)
+
+```
+
+
+##Training classifier on balanced set
+```{r echo=TRUE}
+#Training classifier in the test set with Laplace smoothing
+bills_classifier3 <- naiveBayes(train2, bills_train_labels2, laplace=1)
+
+#Testing the model in the dev set
+bills_pred3 <- predict(bills_classifier3, dev2)
+
+#Visualizing results in dev set
+confusionMatrix(bills_pred3, bills_dev_labels2, mode = "prec_recall")
+```
+
+Now, with a balanced datset and a laplace smoothing, the model on the dev set reports a higher acurracy than before with 70.93%. However, the F1 score also decreased to .7445. Now, after tunning the model, let's assess its performance on the test set. 
+
+#Final Model on Test Set
+
+```{r echo=TRUE}
+#Testing the model in the dev set
+bills_pred4 <- predict(bills_classifier3, test2)
+
+#Visualizing results in dev set
+confusionMatrix(bills_pred4, bills_test_labels2, mode = "prec_recall")
+```
+The model has a final acurracy of 72.97%, and reports a F1 score of 76.89%. This means that the model correctly classifies which party presented the a bill on immigration 73 out of 100 times, depending on the description of the bill. 
+
+
+
+
+
+
+
+
+
+
+
+
